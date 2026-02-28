@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Metric, TimeRange } from "./types";
 import { fetchMetric } from "./api";
 
@@ -7,47 +7,16 @@ const widgetIds: number[] = Array.from({ length: 60 }, function (_, index) {
 });
 
 const Dashboard: React.FC = () => {
-  const [metrics, setMetrics] = useState<Record<number, Metric | undefined>>({});
   const [timeRange, setTimeRange] = useState<TimeRange>("24h");
-  const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [refreshIndex, setRefreshIndex] = useState<number>(0);
+  const [refreshTrigger, setRefreshTrigger] = useState<number>(0);
 
-  useEffect(function () {
-    setIsLoading(true);
-    const newMetrics: Record<number, Metric> = {};
-    let completed = 0;
-    widgetIds.forEach(function (id) {
-      fetchMetric(id).then(function (response) {
-        const metric: Metric = {
-          id: response.id,
-          name: "Widget " + String(response.id) + " (" + timeRange + ")",
-          value: response.value
-        };
-        newMetrics[id] = metric;
-        completed += 1;
-        if (completed === widgetIds.length) {
-          setMetrics(newMetrics);
-          setIsLoading(false);
-        } else {
-          setMetrics(function (previous) {
-            return {
-              ...previous,
-              [id]: metric
-            };
-          });
-        }
-      });
-    });
-  }, [timeRange, refreshIndex]);
+  const handleTimeRangeChange = useCallback(function (event: React.ChangeEvent<HTMLSelectElement>) {
+    setTimeRange(event.target.value as TimeRange);
+  }, []);
 
-  const handleTimeRangeChange = function (event: React.ChangeEvent<HTMLSelectElement>) {
-    const value = event.target.value as TimeRange;
-    setTimeRange(value);
-  };
-
-  const handleRefreshClick = function () {
-    setRefreshIndex(refreshIndex + 1);
-  };
+  const handleRefreshAll = useCallback(function () {
+    setRefreshTrigger(function (prev) { return prev + 1; });
+  }, []);
 
   return (
     <div style={{ padding: "16px", fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif" }}>
@@ -69,14 +38,11 @@ const Dashboard: React.FC = () => {
           </select>
         </label>
         <button
-          onClick={handleRefreshClick}
+          onClick={handleRefreshAll}
           style={{ marginLeft: "12px", padding: "4px 10px", fontSize: "14px", cursor: "pointer" }}
         >
           Refresh all
         </button>
-        {isLoading && (
-          <span style={{ marginLeft: "12px", fontSize: "13px" }}>Loading metrics...</span>
-        )}
       </div>
       <div
         style={{
@@ -89,23 +55,9 @@ const Dashboard: React.FC = () => {
           return (
             <WidgetCard
               key={id}
-              metric={metrics[id]}
+              id={id}
               timeRange={timeRange}
-              onRefresh={function () {
-                fetchMetric(id).then(function (response) {
-                  const metric: Metric = {
-                    id: response.id,
-                    name: "Widget " + String(response.id) + " (" + timeRange + ")",
-                    value: response.value
-                  };
-                  setMetrics(function (previous) {
-                    return {
-                      ...previous,
-                      [id]: metric
-                    };
-                  });
-                });
-              }}
+              refreshTrigger={refreshTrigger}
             />
           );
         })}
@@ -115,39 +67,59 @@ const Dashboard: React.FC = () => {
 };
 
 interface WidgetCardProps {
-  metric: Metric | undefined;
+  id: number;
   timeRange: TimeRange;
-  onRefresh: () => void;
+  refreshTrigger: number;
 }
 
-const WidgetCard: React.FC<WidgetCardProps> = function (props) {
-  const metric = props.metric;
+const WidgetCard: React.FC<WidgetCardProps> = React.memo(function WidgetCard(props) {
+  const id = props.id;
   const timeRange = props.timeRange;
-  const onRefresh = props.onRefresh;
+  const refreshTrigger = props.refreshTrigger;
 
-  const [localValue, setLocalValue] = useState<number | null>(null);
+  const [metric, setMetric] = useState<Metric | undefined>(undefined);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [localRefreshCount, setLocalRefreshCount] = useState<number>(0);
 
   useEffect(
     function () {
-      if (metric) {
-        const baseValue = metric.value;
-        const values = Array.from({ length: 2000 }, function (_, index) {
-          return index + baseValue;
+      let cancelled = false;
+      setIsLoading(true);
+      fetchMetric(id)
+        .then(function (response) {
+          if (cancelled) return;
+          setMetric({
+            id: response.id,
+            name: "Widget " + String(response.id) + " (" + timeRange + ")",
+            value: response.value
+          });
+          setIsLoading(false);
+        })
+        .catch(function () {
+          if (cancelled) return;
+          setIsLoading(false);
         });
-        const sum = values.reduce(function (accumulator, value) {
-          return accumulator + value;
-        }, 0);
-        setLocalValue(sum);
-      } else {
-        setLocalValue(null);
-      }
+      return function () { cancelled = true; };
     },
-    [metric, timeRange]
+    [id, timeRange, refreshTrigger, localRefreshCount]
   );
 
-  const handleClick = function () {
-    onRefresh();
-  };
+  const localValue = useMemo(
+    function () {
+      if (metric === undefined) return null;
+      const values = Array.from({ length: 2000 }, function (_, index) {
+        return index + metric.value;
+      });
+      return values.reduce(function (accumulator, value) {
+        return accumulator + value;
+      }, 0);
+    },
+    [metric?.value]
+  );
+
+  const handleRefresh = useCallback(function () {
+    setLocalRefreshCount(function (prev) { return prev + 1; });
+  }, []);
 
   return (
     <div
@@ -160,26 +132,27 @@ const WidgetCard: React.FC<WidgetCardProps> = function (props) {
       }}
     >
       <div style={{ fontWeight: 600, marginBottom: "4px" }}>
-        {metric ? metric.name : "Loading widget"}
+        {isLoading ? "Loading widget" : metric ? metric.name : "Widget " + String(id)}
       </div>
       <div style={{ marginBottom: "2px" }}>Time range: {timeRange}</div>
-      <div style={{ marginBottom: "2px" }}>Raw value: {metric ? metric.value : "..."}</div>
+      <div style={{ marginBottom: "2px" }}>Raw value: {isLoading ? "..." : metric ? metric.value : "—"}</div>
       <div style={{ marginBottom: "4px" }}>
         Processed value: {localValue === null ? "..." : localValue}
       </div>
       <button
-        onClick={handleClick}
+        onClick={handleRefresh}
+        disabled={isLoading}
         style={{
           marginTop: "4px",
           fontSize: "11px",
           padding: "4px 8px",
-          cursor: "pointer"
+          cursor: isLoading ? "not-allowed" : "pointer"
         }}
       >
-        Reload widget
+        {isLoading ? "Loading..." : "Reload widget"}
       </button>
     </div>
   );
-};
+});
 
 export default Dashboard;
